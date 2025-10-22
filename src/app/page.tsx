@@ -7,19 +7,8 @@ import BalloonList from "@/components/BalloonList";
 import ResultsPanel from "@/components/ResultsPanel";
 import { calculateDistance } from "@/lib/helpers";
 import type { Balloon, Plane } from "@/lib/types";
-import { MOCK_PLANES } from "@/lib/mockData";
 
 // Type definitions for API responses
-type RawBalloonObject = {
-  id: string;
-  lat?: number;
-  lon?: number;
-  alt?: number;
-  latitude?: number;
-  longitude?: number;
-  altitude?: number;
-};
-type RawBalloonData = RawBalloonObject[] | number[][];
 type RawPlaneState = (string | number | boolean | null)[];
 type RawPlaneData = {
   time: number;
@@ -36,21 +25,117 @@ const DynamicMap = dynamic(() => import("@/components/Map"), {
   ),
 });
 
+// Helper function to calculate bounds from balloons
+const calculateBounds = (
+  balloons: Balloon[],
+  padding = 5
+): { lamin: number; lomin: number; lamax: number; lomax: number } | null => {
+  if (!balloons || balloons.length === 0) {
+    return null; // No balloons, no bounds
+  }
+
+  let minLat = 90,
+    maxLat = -90,
+    minLon = 180,
+    maxLon = -180;
+
+  balloons.forEach((b) => {
+    if (typeof b.lat === "number" && typeof b.lon === "number") {
+      minLat = Math.min(minLat, b.lat);
+      maxLat = Math.max(maxLat, b.lat);
+      minLon = Math.min(minLon, b.lon);
+      maxLon = Math.max(maxLon, b.lon);
+    }
+  });
+
+  // Add padding to the bounds
+  minLat = Math.max(-90, minLat - padding);
+  maxLat = Math.min(90, maxLat + padding);
+  minLon = Math.max(-180, minLon - padding);
+  maxLon = Math.min(180, maxLon + padding);
+
+  // Handle cases where only one balloon is found
+  if (balloons.length === 1) {
+    minLat = Math.max(-90, minLat - padding);
+    maxLat = Math.min(90, maxLat + padding);
+    minLon = Math.max(-180, minLon - padding);
+    maxLon = Math.min(180, maxLon + padding);
+  }
+
+  return { lamin: minLat, lomin: minLon, lamax: maxLat, lomax: maxLon };
+};
+
 export default function Home() {
   const [balloons, setBalloons] = useState<Balloon[]>([]);
   const [planes, setPlanes] = useState<Plane[]>([]);
   const [selectedBalloon, setSelectedBalloon] = useState<Balloon | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loadingBalloons, setLoadingBalloons] = useState<boolean>(true);
+  const [loadingPlanes, setLoadingPlanes] = useState<boolean>(false); // Initially false
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchAllData = async () => {
-      setLoading(true);
+    const fetchBalloonsAndThenPlanes = async () => {
+      setLoadingBalloons(true);
+      setLoadingPlanes(false); // Reset plane loading state
       setError(null);
+      setBalloons([]); // Clear previous data
+      setPlanes([]); // Clear previous data
 
+      let fetchedBalloons: Balloon[] = [];
+
+      // --- Step 1: Fetch Consolidated Balloon History ---
       try {
-        // --- Fetch Plane Data with Fallback ---
-        const planeRes = await fetch("/api/planes");
+        console.log("Fetching balloon history...");
+        const balloonRes = await fetch("/api/balloon-history");
+        if (balloonRes.ok) {
+          fetchedBalloons = await balloonRes.json();
+          setBalloons(fetchedBalloons);
+          if (fetchedBalloons.length === 0) {
+            setError("No valid balloon data found in the last 24 hours.");
+            setLoadingBalloons(false);
+            return; // Stop if no balloons found
+          }
+          console.log(`Fetched ${fetchedBalloons.length} balloons.`);
+        } else {
+          const errorData = await balloonRes.json();
+          console.error(
+            `Failed to fetch balloon history (status: ${balloonRes.status}):`,
+            errorData.error
+          );
+          setError(
+            errorData.error ||
+              `Failed to fetch balloon history (status: ${balloonRes.status})`
+          );
+          setLoadingBalloons(false);
+          return; // Stop if balloon fetch failed
+        }
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "An unknown error occurred fetching balloons."
+        );
+        console.error("Critical error fetching balloons:", err);
+        setLoadingBalloons(false);
+        return; // Stop on critical error
+      } finally {
+        setLoadingBalloons(false);
+      }
+
+      // --- Step 2: Calculate Bounds and Fetch Planes ---
+      const bounds = calculateBounds(fetchedBalloons);
+      if (!bounds) {
+        console.warn("Could not calculate bounds from balloon data.");
+        // Optionally set an error or just show no planes
+        return;
+      }
+
+      setLoadingPlanes(true);
+      try {
+        console.log(`Fetching planes within bounds: ${JSON.stringify(bounds)}`);
+        const planeRes = await fetch(
+          `/api/planes?lamin=${bounds.lamin}&lomin=${bounds.lomin}&lamax=${bounds.lamax}&lomax=${bounds.lomax}`
+        );
         if (planeRes.ok) {
           const rawPlaneData: RawPlaneData = await planeRes.json();
           if (rawPlaneData.states) {
@@ -67,105 +152,38 @@ export default function Home() {
                 })
               );
             setPlanes(processedPlanes);
+            console.log(`Fetched ${processedPlanes.length} planes.`);
           } else {
-            console.warn("Live plane API returned no states. Using mock data.");
-            setPlanes(MOCK_PLANES);
+            console.warn("Plane API returned ok, but no 'states' array found.");
+            setPlanes([]); // Ensure empty array if no planes
           }
         } else {
-          // If API fails (e.g., 503 error), fall back to mock data
+          const errorData = await planeRes.json();
           console.error(
-            `Failed to fetch live plane data (status: ${planeRes.status}). Falling back to mock data.`
+            `Failed to fetch plane data (status: ${planeRes.status})`,
+            errorData.error
           );
           setError(
-            "Could not fetch live plane data; using mock data as a fallback."
+            errorData.error ||
+              `Failed to fetch plane data (status: ${planeRes.status})`
           );
-          setPlanes(MOCK_PLANES);
-        }
-
-        // --- Fetch Balloon Data Sequentially ---
-        const latestBalloonData = new Map<string, Balloon>();
-        let anyRequestFailed = false;
-
-        for (let i = 23; i >= 0; i--) {
-          const hour = i.toString().padStart(2, "0");
-          try {
-            const res = await fetch(`/api/users?hour=${hour}`);
-            if (res.ok) {
-              const rawData: RawBalloonData = await res.json();
-              if (Array.isArray(rawData) && rawData.length > 0) {
-                const firstItem = rawData[0];
-                if (
-                  Array.isArray(firstItem) &&
-                  typeof firstItem[0] === "number"
-                ) {
-                  (rawData as number[][]).forEach((b, index) => {
-                    const [lat, lon, alt] = b;
-                    const id = `WBS-H${hour}-${index}`;
-                    if (lat != null && lon != null) {
-                      latestBalloonData.set(id, {
-                        id,
-                        lat,
-                        lon,
-                        alt: (alt ?? 0) * 1000,
-                      });
-                    }
-                  });
-                } else if (typeof firstItem === "object" && "id" in firstItem) {
-                  (rawData as RawBalloonObject[]).forEach((b) => {
-                    const lat = b.lat ?? b.latitude;
-                    const lon = b.lon ?? b.longitude;
-                    if (b.id != null && lat != null && lon != null) {
-                      latestBalloonData.set(b.id, {
-                        id: b.id,
-                        lat,
-                        lon,
-                        alt: (b.alt ?? b.altitude ?? 0) * 0.3048,
-                      });
-                    }
-                  });
-                }
-              }
-            } else {
-              console.warn(
-                `Request for hour ${hour} failed with status ${res.status}`
-              );
-              anyRequestFailed = true;
-            }
-          } catch (e) {
-            console.error(`Error fetching data for hour ${hour}:`, e);
-            anyRequestFailed = true;
-          }
-        }
-
-        const allBalloons: Balloon[] = Array.from(latestBalloonData.values());
-        const finalBalloons = allBalloons.slice(0, 100);
-        setBalloons(finalBalloons);
-
-        if (finalBalloons.length === 0 && !error) {
-          // Only set error if one isn't already set
-          setError(
-            anyRequestFailed
-              ? "Some API requests failed."
-              : "No valid balloon data found in the last 24 hours."
-          );
+          setPlanes([]); // Ensure empty array on error
         }
       } catch (err) {
-        // This will catch critical network errors for the plane API as well
         setError(
-          err instanceof Error ? err.message : "An unknown error occurred."
+          err instanceof Error
+            ? err.message
+            : "An unknown error occurred fetching planes."
         );
-        console.error(
-          "A critical error occurred during data fetching. Falling back to mock plane data.",
-          err
-        );
-        setPlanes(MOCK_PLANES); // Fallback in case of total fetch failure
+        console.error("Critical error fetching planes:", err);
+        setPlanes([]); // Ensure empty array on critical error
       } finally {
-        setLoading(false);
+        setLoadingPlanes(false);
       }
     };
 
-    fetchAllData();
-  }, []);
+    fetchBalloonsAndThenPlanes();
+  }, []); // Run only once on mount
 
   const { closestPlane, distance } = useMemo(() => {
     if (!selectedBalloon || planes.length === 0) {
@@ -174,15 +192,22 @@ export default function Home() {
     let closest: Plane | null = null;
     let minDistance = Infinity;
     for (const plane of planes) {
-      const dist = calculateDistance(
-        selectedBalloon.lat,
-        selectedBalloon.lon,
-        plane.lat,
-        plane.lon
-      );
-      if (dist < minDistance) {
-        minDistance = dist;
-        closest = plane;
+      if (
+        typeof plane.lat === "number" &&
+        typeof plane.lon === "number" &&
+        typeof selectedBalloon.lat === "number" &&
+        typeof selectedBalloon.lon === "number"
+      ) {
+        const dist = calculateDistance(
+          selectedBalloon.lat,
+          selectedBalloon.lon,
+          plane.lat,
+          plane.lon
+        );
+        if (dist < minDistance) {
+          minDistance = dist;
+          closest = plane;
+        }
       }
     }
     return { closestPlane: closest, distance: minDistance };
@@ -194,10 +219,12 @@ export default function Home() {
   };
 
   const statusText = useMemo(() => {
-    if (loading) return "Fetching live data for balloons and planes...";
+    if (loadingBalloons) return "Fetching balloon history...";
+    if (loadingPlanes)
+      return `Fetching planes near ${balloons.length} balloons...`;
     if (error) return `Error: ${error}`;
     return `Tracking ${balloons.length} balloons and ${planes.length} planes.`;
-  }, [loading, error, balloons.length, planes.length]);
+  }, [loadingBalloons, loadingPlanes, error, balloons.length, planes.length]);
 
   return (
     <div className="bg-gray-900 text-gray-200 flex flex-col h-screen overflow-hidden font-sans">

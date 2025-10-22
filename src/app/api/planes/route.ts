@@ -1,19 +1,50 @@
-import { NextResponse } from "next/server";
-export const maxDuration = 120; // Keep your increased function duration setting
+import { NextRequest, NextResponse } from "next/server";
+export const maxDuration = 120; // Keep increased duration
 
 // Helper function to delay execution
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function GET() {
-  const API_URL = "https://opensky-network.org/api/states/all";
-  console.log(`[${new Date().toISOString()}] /api/planes: Function invoked.`);
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
 
-  let retries = 2; // Number of retries (e.g., try initial + 2 retries = 3 total attempts)
-  let lastError: any = null; // Store the last error encountered
+  // --- Read bounding box params from query ---
+  const lamin = searchParams.get("lamin");
+  const lomin = searchParams.get("lomin");
+  const lamax = searchParams.get("lamax");
+  const lomax = searchParams.get("lomax");
+
+  // --- Validate parameters ---
+  if (!lamin || !lomin || !lamax || !lomax) {
+    return NextResponse.json(
+      { error: "Missing bounding box parameters (lamin, lomin, lamax, lomax)" },
+      { status: 400 }
+    );
+  }
+  // Basic validation (can be made more robust)
+  if (
+    isNaN(parseFloat(lamin)) ||
+    isNaN(parseFloat(lomin)) ||
+    isNaN(parseFloat(lamax)) ||
+    isNaN(parseFloat(lomax))
+  ) {
+    return NextResponse.json(
+      { error: "Invalid bounding box parameters. Must be numbers." },
+      { status: 400 }
+    );
+  }
+
+  // Construct the scoped API URL using query parameters
+  const API_URL = `https://opensky-network.org/api/states/all?lamin=${lamin}&lomin=${lomin}&lamax=${lamax}&lomax=${lomax}`;
+
+  console.log(
+    `[${new Date().toISOString()}] /api/planes: Function invoked. Fetching scoped data.`
+  );
+
+  let retries = 2;
+  let lastError: any = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
-    // Keep the overall fetch timeout relatively short for each attempt
     const timeoutMs = 20000; // 20 seconds per attempt
     const timeoutId = setTimeout(() => {
       console.log(
@@ -26,7 +57,7 @@ export async function GET() {
 
     try {
       if (attempt > 0) {
-        const waitTime = attempt * 1000; // Exponential backoff (1s, 2s)
+        const waitTime = attempt * 1000;
         console.log(
           `[${new Date().toISOString()}] /api/planes: Retrying fetch (Attempt ${
             attempt + 1
@@ -37,22 +68,19 @@ export async function GET() {
       console.log(
         `[${new Date().toISOString()}] /api/planes (Attempt ${
           attempt + 1
-        }): Attempting to fetch from ${API_URL}`
+        }): Attempting fetch: ${API_URL}`
       );
 
       const res = await fetch(API_URL, {
-        method: "GET", // Explicitly setting method can sometimes help
+        method: "GET",
         headers: {
           "Content-Type": "application/json",
-          // OpenSky doesn't require auth, but some APIs might need 'User-Agent'
         },
-        next: { revalidate: 30 }, // Keep caching strategy
+        next: { revalidate: 30 }, // Keep caching
         signal: controller.signal,
-        // Consider removing keepalive if not needed, might interact with timeouts
-        // keepalive: false
       });
 
-      clearTimeout(timeoutId); // Clear timeout as fetch completed (successfully or not)
+      clearTimeout(timeoutId);
 
       console.log(
         `[${new Date().toISOString()}] /api/planes (Attempt ${
@@ -62,36 +90,33 @@ export async function GET() {
 
       if (res.ok) {
         console.log(
-          `[${new Date().toISOString()}] /api/planes: Response OK. Attempting to parse JSON.`
+          `[${new Date().toISOString()}] /api/planes: Response OK. Parsing JSON.`
         );
         const data = await res.json();
         console.log(
-          `[${new Date().toISOString()}] /api/planes: JSON parsed successfully. Returning data.`
+          `[${new Date().toISOString()}] /api/planes: JSON parsed. Returning data.`
         );
-        return NextResponse.json(data); // Success, return the data immediately
+        // Note: OpenSky might return null for 'states' if no planes are in the box
+        return NextResponse.json(data);
       }
 
-      // Handle non-ok responses (4xx, 5xx from OpenSky)
       console.error(
         `[${new Date().toISOString()}] /api/planes (Attempt ${
           attempt + 1
-        }): Fetch failed with status ${res.status} ${res.statusText}`
+        }): Fetch failed: ${res.status} ${res.statusText}`
       );
       let errorBody = `Status: ${res.status} ${res.statusText}`;
       try {
         errorBody = await res.text();
-      } catch (bodyError) {
-        console.warn(
-          `[${new Date().toISOString()}] /api/planes: Could not read error body.`
-        );
+      } catch {
+        /* ignore */
       }
       lastError = {
-        // Store error details for potential final response
         status: res.status,
-        message: `Failed to fetch external plane data: ${res.statusText}`,
+        message: `Failed fetch: ${res.statusText}`,
         details: errorBody,
       };
-      // If it's a client error (4xx) or a persistent server error (5xx on last attempt), don't retry unnecessarily
+
       if ((res.status >= 400 && res.status < 500) || attempt === retries) {
         return NextResponse.json(
           { error: lastError.message, details: lastError.details },
@@ -99,8 +124,8 @@ export async function GET() {
         );
       }
     } catch (error: any) {
-      clearTimeout(timeoutId); // Clear timeout on any fetch error
-      lastError = error; // Store the error
+      clearTimeout(timeoutId);
+      lastError = error;
       console.error(
         `[${new Date().toISOString()}] /api/planes (Attempt ${
           attempt + 1
@@ -108,52 +133,35 @@ export async function GET() {
         error
       );
 
-      // Check if the error was due to our explicit abort (timeout)
       if (error.name === "AbortError") {
-        // If AbortError happens on the last attempt, return 504
         if (attempt === retries) {
           console.error(
-            `[${new Date().toISOString()}] /api/planes: Fetch aborted due to timeout (${timeoutMs}ms) on final attempt.`
+            `[${new Date().toISOString()}] /api/planes: Timeout (${timeoutMs}ms) on final attempt.`
           );
           return NextResponse.json(
-            {
-              error: `Request to external API timed out after ${
-                timeoutMs / 1000
-              } seconds.`,
-            },
+            { error: `Request timed out after ${timeoutMs / 1000}s.` },
             { status: 504 }
-          ); // Gateway Timeout
+          );
         }
-        // Otherwise, the loop will continue to the next retry
-      }
-      // If it's another type of error on the last attempt, return 500
-      else if (attempt === retries) {
-        let errorMessage = "An internal server error occurred after retries";
-        if (error instanceof Error) {
-          errorMessage = error.message;
-        }
+      } else if (attempt === retries) {
         return NextResponse.json(
           {
-            error: errorMessage,
-            details: error instanceof Error ? error.stack : String(error),
+            error: error.message || "Internal Server Error",
+            details: error.stack,
           },
           { status: 500 }
         );
       }
-      // Otherwise, the loop will continue to the next retry
     }
   }
 
-  // Should theoretically not be reached if retries > 0, but as a fallback:
+  // Fallback if loop finishes without returning (shouldn't happen with retries > 0)
   console.error(
-    `[${new Date().toISOString()}] /api/planes: All fetch attempts failed. Last error:`,
+    `[${new Date().toISOString()}] /api/planes: All attempts failed. Last error:`,
     lastError
   );
   return NextResponse.json(
-    {
-      error: "Failed to fetch data after multiple retries.",
-      details: String(lastError),
-    },
+    { error: "Failed after multiple retries.", details: String(lastError) },
     { status: 500 }
   );
 }
