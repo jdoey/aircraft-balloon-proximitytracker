@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+export const maxDuration = 120;
 
 export async function GET() {
   const API_URL = "https://opensky-network.org/api/states/all";
