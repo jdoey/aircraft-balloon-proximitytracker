@@ -7,6 +7,8 @@ import BalloonList from "@/components/BalloonList";
 import ResultsPanel from "@/components/ResultsPanel";
 import { calculateDistance } from "@/lib/helpers";
 import type { Balloon, Plane } from "@/lib/types";
+// *** Import MOCK_PLANES_NA specifically ***
+import { MOCK_PLANES_NA } from "@/lib/mockData";
 
 // Type definitions for API responses
 type RawPlaneState = (string | number | boolean | null)[];
@@ -82,32 +84,53 @@ export default function Home() {
       setPlanes([]); // Clear previous data
 
       let fetchedBalloons: Balloon[] = [];
+      let planeDataUsedIsMock = false; // Flag to track if fallback was used
 
       // --- Step 1: Fetch Consolidated Balloon History ---
       try {
         console.log("Fetching balloon history...");
         const balloonRes = await fetch("/api/balloon-history");
-        if (balloonRes.ok) {
-          fetchedBalloons = await balloonRes.json();
-          setBalloons(fetchedBalloons);
-          if (fetchedBalloons.length === 0) {
-            setError("No valid balloon data found in the last 24 hours.");
-            setLoadingBalloons(false);
-            return; // Stop if no balloons found
+
+        if (!balloonRes.ok) {
+          let errorData = { error: `HTTP error! Status: ${balloonRes.status}` };
+          try {
+            const potentialJson = await balloonRes.json();
+            if (potentialJson && potentialJson.error) {
+              errorData = potentialJson;
+            }
+          } catch {
+            /* ignore */
           }
-          console.log(`Fetched ${fetchedBalloons.length} balloons.`);
-        } else {
-          const errorData = await balloonRes.json();
           console.error(
             `Failed to fetch balloon history (status: ${balloonRes.status}):`,
             errorData.error
           );
+          setError(errorData.error);
+          setLoadingBalloons(false);
+          return;
+        }
+
+        const contentType = balloonRes.headers.get("content-type");
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          fetchedBalloons = await balloonRes.json();
+          setBalloons(fetchedBalloons);
+          if (fetchedBalloons.length === 0) {
+            // Keep the error state clean if balloon fetch succeeded but was empty
+            // setError("No valid balloon data found in the last 24 hours.");
+            console.log("No valid balloon data found in the last 24 hours.");
+          }
+          console.log(`Fetched ${fetchedBalloons.length} balloons.`);
+        } else {
+          const responseText = await balloonRes.text();
+          console.error(
+            `Failed to fetch balloon history: Expected JSON but received ${contentType}. Response body:`,
+            responseText.substring(0, 500)
+          );
           setError(
-            errorData.error ||
-              `Failed to fetch balloon history (status: ${balloonRes.status})`
+            `Server returned unexpected content type (${contentType}) for balloons.`
           );
           setLoadingBalloons(false);
-          return; // Stop if balloon fetch failed
+          return;
         }
       } catch (err) {
         setError(
@@ -117,7 +140,7 @@ export default function Home() {
         );
         console.error("Critical error fetching balloons:", err);
         setLoadingBalloons(false);
-        return; // Stop on critical error
+        return;
       } finally {
         setLoadingBalloons(false);
       }
@@ -125,8 +148,12 @@ export default function Home() {
       // --- Step 2: Calculate Bounds and Fetch Planes ---
       const bounds = calculateBounds(fetchedBalloons);
       if (!bounds) {
-        console.warn("Could not calculate bounds from balloon data.");
-        // Optionally set an error or just show no planes
+        console.warn(
+          "Could not calculate bounds from balloon data (list might be empty). Using NA mock data as fallback."
+        );
+        setPlanes(MOCK_PLANES_NA); // Use NA mock data if no bounds
+        planeDataUsedIsMock = true;
+        // Don't set loadingPlanes to true if we aren't fetching
         return;
       }
 
@@ -137,46 +164,80 @@ export default function Home() {
           `/api/planes?lamin=${bounds.lamin}&lomin=${bounds.lomin}&lamax=${bounds.lamax}&lomax=${bounds.lomax}`
         );
         if (planeRes.ok) {
-          const rawPlaneData: RawPlaneData = await planeRes.json();
-          if (rawPlaneData.states) {
-            const processedPlanes = rawPlaneData.states
-              .filter((p) => p[5] != null && p[6] != null && !p[8])
-              .map(
-                (p): Plane => ({
-                  icao24: p[0] as string,
-                  callsign: ((p[1] as string) || "N/A").trim(),
-                  origin_country: p[2] as string,
-                  lon: p[5] as number,
-                  lat: p[6] as number,
-                  baro_altitude: p[7] as number | null,
-                })
+          const contentTypePlanes = planeRes.headers.get("content-type");
+          if (
+            contentTypePlanes &&
+            contentTypePlanes.indexOf("application/json") !== -1
+          ) {
+            const rawPlaneData: RawPlaneData = await planeRes.json();
+            if (rawPlaneData.states) {
+              const processedPlanes = rawPlaneData.states
+                .filter((p) => p[5] != null && p[6] != null && !p[8])
+                .map(
+                  (p): Plane => ({
+                    icao24: p[0] as string,
+                    callsign: ((p[1] as string) || "N/A").trim(),
+                    origin_country: p[2] as string,
+                    lon: p[5] as number,
+                    lat: p[6] as number,
+                    baro_altitude: p[7] as number | null,
+                  })
+                );
+              setPlanes(processedPlanes);
+              console.log(`Fetched ${processedPlanes.length} planes.`);
+            } else {
+              console.warn(
+                "Plane API returned ok and JSON, but no 'states' array found. Using NA mock data."
               );
-            setPlanes(processedPlanes);
-            console.log(`Fetched ${processedPlanes.length} planes.`);
+              setPlanes(MOCK_PLANES_NA); // Use NA mock data if 'states' is missing/null
+              planeDataUsedIsMock = true;
+            }
           } else {
-            console.warn("Plane API returned ok, but no 'states' array found.");
-            setPlanes([]); // Ensure empty array if no planes
+            const responseText = await planeRes.text();
+            console.error(
+              `Failed to fetch planes: Expected JSON but received ${contentTypePlanes}. Response body:`,
+              responseText.substring(0, 500)
+            );
+            setError(
+              `Server returned unexpected content type (${contentTypePlanes}) for planes. Using NA mock data.`
+            );
+            setPlanes(MOCK_PLANES_NA); // Use NA mock data on content type error
+            planeDataUsedIsMock = true;
           }
         } else {
-          const errorData = await planeRes.json();
+          let errorData = {
+            error: `Plane fetch failed! Status: ${planeRes.status}`,
+          };
+          try {
+            errorData = await planeRes.json();
+          } catch {
+            /* ignore */
+          }
           console.error(
-            `Failed to fetch plane data (status: ${planeRes.status})`,
+            `Failed to fetch plane data (status: ${planeRes.status}). Using NA mock data.`,
             errorData.error
           );
+          // Set error state *before* setting mock data
           setError(
             errorData.error ||
-              `Failed to fetch plane data (status: ${planeRes.status})`
+              `Failed to fetch plane data (status: ${planeRes.status}). Using mock data.`
           );
-          setPlanes([]); // Ensure empty array on error
+          setPlanes(MOCK_PLANES_NA); // *** Use MOCK_PLANES_NA as fallback ***
+          planeDataUsedIsMock = true;
         }
       } catch (err) {
+        // Set error state *before* setting mock data
         setError(
           err instanceof Error
             ? err.message
-            : "An unknown error occurred fetching planes."
+            : "An unknown error occurred fetching planes. Using mock data."
         );
-        console.error("Critical error fetching planes:", err);
-        setPlanes([]); // Ensure empty array on critical error
+        console.error(
+          "Critical error fetching planes. Using NA mock data.",
+          err
+        );
+        setPlanes(MOCK_PLANES_NA); // *** Use MOCK_PLANES_NA as fallback ***
+        planeDataUsedIsMock = true;
       } finally {
         setLoadingPlanes(false);
       }
