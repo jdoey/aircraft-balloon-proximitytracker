@@ -1,9 +1,20 @@
 import { NextResponse } from "next/server";
-export const maxDuration = 120; // Keep your increased duration setting
+export const maxDuration = 120; // Keep your increased function duration setting
 
 export async function GET() {
   const API_URL = "https://opensky-network.org/api/states/all";
-  console.log(`[${new Date().toISOString()}] /api/planes: Function invoked.`); // Log start
+  console.log(`[${new Date().toISOString()}] /api/planes: Function invoked.`);
+
+  // --- Add AbortController for fetch timeout ---
+  const controller = new AbortController();
+  const timeoutMs = 30000; // Increase fetch timeout to 30 seconds (adjust as needed)
+  const timeoutId = setTimeout(() => {
+    console.log(
+      `[${new Date().toISOString()}] /api/planes: Fetch timed out after ${timeoutMs}ms`
+    );
+    controller.abort();
+  }, timeoutMs);
+  // ---------------------------------------------
 
   try {
     console.log(
@@ -14,13 +25,20 @@ export async function GET() {
         "Content-Type": "application/json",
       },
       next: { revalidate: 30 },
+      // --- Pass the AbortSignal to fetch ---
+      signal: controller.signal,
+      // ------------------------------------
     });
+
+    // --- Clear the timeout if fetch completes successfully ---
+    clearTimeout(timeoutId);
+    // ------------------------------------------------------
 
     console.log(
       `[${new Date().toISOString()}] /api/planes: Fetch completed. Status: ${
         res.status
       }`
-    ); // Log status immediately
+    );
 
     if (!res.ok) {
       console.error(
@@ -28,10 +46,9 @@ export async function GET() {
           res.status
         } ${res.statusText}`
       );
-      // Try to get error body text if possible, but be careful as it might not be JSON
       let errorBody = `Status: ${res.status} ${res.statusText}`;
       try {
-        errorBody = await res.text(); // Get raw text body
+        errorBody = await res.text();
       } catch (bodyError) {
         console.warn(
           `[${new Date().toISOString()}] /api/planes: Could not read error body.`
@@ -54,8 +71,28 @@ export async function GET() {
       `[${new Date().toISOString()}] /api/planes: JSON parsed successfully. Returning data.`
     );
     return NextResponse.json(data);
-  } catch (error) {
-    // Log the *entire* error object for maximum detail
+  } catch (error: any) {
+    // Type error as any to check its name property
+    // --- Clear the timeout if fetch throws an error (including abort) ---
+    clearTimeout(timeoutId);
+    // -------------------------------------------------------------
+
+    // Check if the error was due to our explicit abort (timeout)
+    if (error.name === "AbortError") {
+      console.error(
+        `[${new Date().toISOString()}] /api/planes: Fetch aborted due to timeout (${timeoutMs}ms).`
+      );
+      return NextResponse.json(
+        {
+          error: `Request to external API timed out after ${
+            timeoutMs / 1000
+          } seconds.`,
+        },
+        { status: 504 }
+      ); // Gateway Timeout
+    }
+
+    // Log other errors
     console.error(
       `[${new Date().toISOString()}] /api/planes: Caught error in try-catch block:`,
       error
@@ -64,7 +101,6 @@ export async function GET() {
     if (error instanceof Error) {
       errorMessage = error.message;
     }
-    // Include the error message in the response body if possible
     return NextResponse.json(
       {
         error: errorMessage,
