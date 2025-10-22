@@ -4,40 +4,22 @@ export const maxDuration = 120; // Keep increased duration
 // Helper function to delay execution
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// --- Define North America Bounding Box ---
+const NA_BOUNDS = {
+  minLat: 15, // Approx Southern boundary
+  maxLat: 85, // Approx Northern boundary
+  minLon: -170, // Approx Western boundary
+  maxLon: -50, // Approx Eastern boundary
+};
+
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
+  // request parameter might still be useful for headers etc. later
 
-  // --- Read bounding box params from query ---
-  const lamin = searchParams.get("lamin");
-  const lomin = searchParams.get("lomin");
-  const lamax = searchParams.get("lamax");
-  const lomax = searchParams.get("lomax");
-
-  // --- Validate parameters ---
-  if (!lamin || !lomin || !lamax || !lomax) {
-    return NextResponse.json(
-      { error: "Missing bounding box parameters (lamin, lomin, lamax, lomax)" },
-      { status: 400 }
-    );
-  }
-  // Basic validation (can be made more robust)
-  if (
-    isNaN(parseFloat(lamin)) ||
-    isNaN(parseFloat(lomin)) ||
-    isNaN(parseFloat(lamax)) ||
-    isNaN(parseFloat(lomax))
-  ) {
-    return NextResponse.json(
-      { error: "Invalid bounding box parameters. Must be numbers." },
-      { status: 400 }
-    );
-  }
-
-  // Construct the scoped API URL using query parameters
-  const API_URL = `https://opensky-network.org/api/states/all?lamin=${lamin}&lomin=${lomin}&lamax=${lamax}&lomax=${lomax}`;
+  // Construct the scoped API URL using the hardcoded North America bounds
+  const API_URL = `https://opensky-network.org/api/states/all?lamin=${NA_BOUNDS.minLat}&lomin=${NA_BOUNDS.minLon}&lamax=${NA_BOUNDS.maxLat}&lomax=${NA_BOUNDS.maxLon}`;
 
   console.log(
-    `[${new Date().toISOString()}] /api/planes: Function invoked. Fetching scoped data.`
+    `[${new Date().toISOString()}] /api/planes: Function invoked. Fetching North America plane data.`
   );
 
   let retries = 2;
@@ -117,6 +99,7 @@ export async function GET(request: NextRequest) {
         details: errorBody,
       };
 
+      // If it's a client error (4xx) or a persistent server error (5xx on last attempt), return immediately
       if ((res.status >= 400 && res.status < 500) || attempt === retries) {
         return NextResponse.json(
           { error: lastError.message, details: lastError.details },
@@ -134,6 +117,7 @@ export async function GET(request: NextRequest) {
       );
 
       if (error.name === "AbortError") {
+        // If AbortError happens on the last attempt, return 504
         if (attempt === retries) {
           console.error(
             `[${new Date().toISOString()}] /api/planes: Timeout (${timeoutMs}ms) on final attempt.`
@@ -143,7 +127,9 @@ export async function GET(request: NextRequest) {
             { status: 504 }
           );
         }
+        // Otherwise, the loop will continue to the next retry
       } else if (attempt === retries) {
+        // If it's another type of error on the last attempt, return 500
         return NextResponse.json(
           {
             error: error.message || "Internal Server Error",
@@ -152,6 +138,7 @@ export async function GET(request: NextRequest) {
           { status: 500 }
         );
       }
+      // Otherwise, the loop will continue to the next retry
     }
   }
 

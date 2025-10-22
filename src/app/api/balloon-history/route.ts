@@ -16,6 +16,25 @@ type RawBalloonObject = {
 };
 type RawBalloonData = RawBalloonObject[] | number[][];
 
+// --- Define North America Bounding Box ---
+const NA_BOUNDS = {
+  minLat: 15, // Approx Southern boundary
+  maxLat: 85, // Approx Northern boundary
+  minLon: -170, // Approx Western boundary
+  maxLon: -50, // Approx Eastern boundary
+};
+
+// Helper function to check if coordinates are within North America
+const isWithinNorthAmerica = (lat: number, lon: number): boolean => {
+  return (
+    lat >= NA_BOUNDS.minLat &&
+    lat <= NA_BOUNDS.maxLat &&
+    lon >= NA_BOUNDS.minLon &&
+    lon <= NA_BOUNDS.maxLon
+  );
+};
+// -----------------------------------------
+
 export async function GET() {
   const latestBalloonData = new Map<string, Balloon>();
   let anyRequestFailed = false;
@@ -23,18 +42,19 @@ export async function GET() {
   // Define timeoutMs here so it's accessible in the catch block
   const timeoutMs = 25000; // 25 seconds for *each* sequential fetch
 
-  console.log("Starting sequential fetch for 24-hour balloon history...");
+  console.log(
+    "Starting sequential fetch for 24-hour balloon history (North America)..."
+  );
 
   // Sequentially fetch data for each hour from 23 down to 00
   for (let i = 23; i >= 0; i--) {
     const hour = i.toString().padStart(2, "0");
     const API_URL = `https://a.windbornesystems.com/treasure/${hour}.json`;
-    console.log(`Fetching: ${API_URL}`);
+    // console.log(`Fetching: ${API_URL}`); // Less verbose logging
 
     try {
       // Use a slightly longer timeout for each individual fetch within the sequence
       const controller = new AbortController();
-      // const timeoutMs = 25000; // Moved outside the loop
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       const res = await fetch(API_URL, {
@@ -56,8 +76,13 @@ export async function GET() {
             if (Array.isArray(firstItem) && typeof firstItem[0] === "number") {
               (rawData as number[][]).forEach((b, index) => {
                 const [lat, lon, alt] = b;
-                const id = `WBS-H${hour}-${index}`;
-                if (lat != null && lon != null) {
+                // *** ADD North America Check ***
+                if (
+                  lat != null &&
+                  lon != null &&
+                  isWithinNorthAmerica(lat, lon)
+                ) {
+                  const id = `WBS-H${hour}-${index}`;
                   latestBalloonData.set(id, {
                     id,
                     lat,
@@ -70,7 +95,13 @@ export async function GET() {
               (rawData as RawBalloonObject[]).forEach((b) => {
                 const lat = b.lat ?? b.latitude;
                 const lon = b.lon ?? b.longitude;
-                if (b.id != null && lat != null && lon != null) {
+                // *** ADD North America Check ***
+                if (
+                  b.id != null &&
+                  lat != null &&
+                  lon != null &&
+                  isWithinNorthAmerica(lat, lon)
+                ) {
                   latestBalloonData.set(b.id, {
                     id: b.id,
                     lat,
@@ -109,10 +140,11 @@ export async function GET() {
   }
 
   const allBalloons: Balloon[] = Array.from(latestBalloonData.values());
-  const finalBalloons = allBalloons.slice(0, 100); // Limit to the first 10
+  // Still limit the *final* result to 10, even if more were found in NA
+  const finalBalloons = allBalloons.slice(0, 50);
 
   console.log(
-    `Finished fetching. Found ${allBalloons.length} unique balloons, returning ${finalBalloons.length}. Any failures: ${anyRequestFailed}`
+    `Finished fetching. Found ${allBalloons.length} unique balloons in NA, returning ${finalBalloons.length}. Any failures: ${anyRequestFailed}`
   );
 
   // Return the processed data or an error
@@ -121,17 +153,17 @@ export async function GET() {
     return NextResponse.json(
       {
         error:
-          "Some API requests failed, and no valid balloon data could be retrieved.",
+          "Some API requests failed, and no valid balloon data could be retrieved for North America.",
         details: fetchErrors,
       },
       { status: 502 }
     ); // Bad Gateway
   }
   if (finalBalloons.length === 0) {
-    // If all requests succeeded but returned no data, return 404 or empty array
-    // Returning empty array might be better for the frontend logic
-    // return NextResponse.json({ error: "Data fetched successfully, but no balloon coordinates were found in the API responses for the last 24 hours.", details: [] }, { status: 404 });
-    console.log("Returning empty balloon array as no data was found.");
+    // If all requests succeeded but returned no data *within NA*, return empty array
+    console.log(
+      "Returning empty balloon array as no data was found within North America."
+    );
     return NextResponse.json([]); // Return empty array
   }
 
